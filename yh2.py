@@ -1,4 +1,5 @@
 import requests # interaction with the web
+from collections import Counter
 import os  #  file system operations
 import yaml # human-friendly data format
 import re  # regular expressions
@@ -7,7 +8,13 @@ import datetime as dt # date and time functions
 import io
 import bs4 as bs  # web scraping
 import pickle  # object serialization to save list of S&P500 companies
+import numpy as np
 import pandas_datareader.data as web
+import matplotlib.pyplot as plt
+from matplotlib import style
+
+
+style.use('ggplot')
 
 def save_sp500_tickers():
     resp = requests.get('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')
@@ -136,7 +143,8 @@ def get_data_from_yahoo(reload_sp500=False):
             called. The main advantage of StringIO is that it can be used where a
             file was expected '''
 
-           # print("buffer = ",buf)
+            # print("buffer = ",buf)
+
 
             df = pd.read_csv(buf,index_col=0) # convert to pandas DataFrame
             ''' the first col contains dates & this is used as the index column '''
@@ -154,49 +162,159 @@ def get_data_from_yahoo(reload_sp500=False):
 def compile_data():
     with open("sp500tickers.pickle", "rb") as f:
         tickers = pickle.load(f)
-
+    # this function was causing hassle. This warning kept occurring
+    ''' sys:1: DtypeWarning: Columns (129,151,208,218,219,225,231,232,
+    249,258,270,284,308,314,328,347,355,374,388,392,393,403,416,424,429
+    ,431,448,450,451,473,489) have mixed types. Specify dtype option on
+    import or set low_memory=False.  Dtype Guessing (very bad). See
+    https://stackoverflow.com/questions/24251219/pandas-read-csv-low-memory-and-dtype-options
+    for the solution implemented below which was to use a converter on
+    the Adjusted Close column'''
+    def conv(val):  # this was the solution
+        if not val:
+            return 0
+        try:
+            return np.float64(val)
+        except:
+            return np.float64(0)
     main_df = pd.DataFrame()  # create an empty dataframe obj without cols or index
-
     for count,ticker in enumerate(tickers):  # enumerate through an interable
-        df = pd.read_csv('stock_dfs/{}.csv'.format(ticker))
+        df = pd.read_csv('stock_dfs/{}.csv'.format(ticker),converters={'Adj Close':conv})
         df.set_index('Date', inplace=True)
-
         df.rename(columns={'Adj Close': ticker}, inplace=True)  # what
         ''' used to be Adjusted Close is now ticker '''
-
         df.drop(['Open','High','Low', 'Close','Volume'], 1, inplace=True)
-        ''' drop everything else on axes 1 '''
-        # print(df.head())
-
+        ''' drop everything else on axes 1 which is the columns'''
         if main_df.empty:
             main_df = df  # boom! now it's not empty
         else:
-            print(main_df)
             main_df = main_df.join(df, how="outer")
-            # main_df.join(df, lsuffix='_l', how='outer')
-
-
             '''form a single dataframe by joining all the individual
             dataframes together into one big df that just contains cols
             of the sp500 tickers close prices as cols of close prices
             how = outer fills in any blanks in the various cols with naN
             data so making everything compatible '''
-
             if count % 10 == 0: # every 10th
                 print(count)
-
     print(main_df.head())
-    # main_df.to_csv('sp500_joined_closes.csv')
+    main_df.to_csv('sp500_joined_closes.csv')
+
 
 def visualize_data():
     df = pd.read_csv('sp500_joined_closes.csv')
-    # df['AAPL'].plot()
-    # plt.show()
+    #  df['AAPL'].plot()
+    plt.show()
     df_corr = df.corr()  # correlates everything nb paid services!
     print(df_corr.tail())
+    data = df_corr.values  # the inner values of the df - everything
+    ''' except the index & the headers - a numpy array of the cols & rows '''
+    fig = plt.figure()  # figure is the top level container that
+    ''' matplotlib uses to contain & plot all of the plot elements '''
+    ax = fig.add_subplot(1,1,1)  # 1x1 & is plot number 1
+    heatmap = ax.pcolor(data, cmap=plt.cm.RdYlGn)  # to plot some colours
+    ''' This heatmap is made using a range of colors, which can be a
+    range of anything to anything, and the color scale is generated from
+    the cmap that we use. RdYlGn, is a colormap that goes from red on the
+    low side, yellow for the middle, and green for the higher part of the
+    scale, which will give us red for negative correlations, green for
+    positive correlations, and yellow for no-correlations. We'll add a
+    side-bar that is a colorbar as a sort of "scale" for us: '''
+    fig.colorbar(heatmap)  # a legend to depict ranges
+    #  plot colours on a grid, company tick-marks at half-marks 0.5, 1.5
+    ''' & so on '''
+    ax.set_xticks(np.arange(data.shape[0]) + 0.5, minor=False)
+    ax.set_yticks(np.arange(data.shape[1]) + 0.5, minor=False)
 
-#  get_data_from_yahoo()
+    ax.invert_yaxis()  # This will flip our yaxis, so that the graph is
+    ''' a little easier to read, since there will be some space between
+    the x's and y's. Generally matplotlib leaves room on the extreme
+    ends of your graph since this tends to make graphs easier to read,
+    but, in our case, it doesn't. Then we also flip the xaxis to be at
+    the top of the graph, rather than the traditional bottom, again to
+    just make this more like a correlation table should be '''
+    ax.xaxis.tick_top()
+
+    column_labels = df_corr.columns
+    row_labels = df_corr.index
+    ax.set_xticklabels(column_labels)
+    ax.set_yticklabels(row_labels)
+    plt.xticks(rotation=90)
+    heatmap.set_clim(-1,1)  # colour density limits
+    plt.tight_layout()
+    #plt.savefig("correlations.png", dpi = (300))
+    plt.show()
 
 
-compile_data()
+# MACHINE LEARNING STRATEGY
+    ''' correlated companies rise & fall IN SYNC, some lead, some lag.
+    ML can model this (classifier). Rise 2% buy, fall 2% sell, otherwise
+    hold. Each model is on a per company basis but takes into account ALL
+    other companies in the S&P500  '''
 
+def process_data_for_labels(ticker):
+    hm_days = 7  # going up, down, sideways in next 7/7 ???
+    df = pd.read_csv('sp500_joined_closes.csv', index_col=0)
+    tickers = df.columns.values.tolist()  # !!!!!!!!!!!!!!!!!!!!!!!!
+    df.fillna(0,inplace=True)
+    '''PERCENT CHANGE FORMULA (new - old)/old '''
+    for i in range(1,hm_days+1):
+        df['{}_{}d'.format(ticker,i)] = (df[ticker].shift(-i) - df[ticker]) / df[ticker]
+    df.fillna(0, inplace=True)
+    return tickers, df
+
+
+'''args are the % changes that have been predicted for the coming 7/7 '''
+def buy_sell_hold(*args):
+    cols = [c for c in args]
+    requirement = 0.02
+    for col in cols:
+        if col > requirement:
+            return 1
+        if col < -requirement:
+            return -1
+    return 0
+    # this is mapped to a pandas dataframe - see below
+
+def extract_featuresets(ticker):
+    tickers, df = process_data_for_labels(ticker)  # the function returns
+    ''' tickers & df remember nb see implentation above '''
+      # create a new col using the mapped output from the buy_sell_hold()
+    df['{}_target'.format(ticker)] = list(map( buy_sell_hold,
+                                               df['{}_1d'.format(ticker)],
+                                               df['{}_2d'.format(ticker)],
+                                               df['{}_3d'.format(ticker)],
+                                               df['{}_4d'.format(ticker)],
+                                               df['{}_5d'.format(ticker)],
+                                               df['{}_6d'.format(ticker)],
+                                               df['{}_7d'.format(ticker)] ))
+    ''' A Counter is a dict subclass for counting hashable objects. It is
+    an unordered collection where elements are stored as dictionary keys
+    and their counts are stored as dictionary values. Counts are allowed
+    to be any integer value including zero or negative counts. The Counter
+    class is similar to bags or multisets in other languages. Elements are
+    counted from an iterable or initialized from another mapping (or counter): '''
+
+    vals = df['{}_target'.format(ticker)].values.tolist()
+    str_vals = [str(i) for i in vals]
+    print('Data spread:', Counter(str_vals))
+    df.fillna(0, inplace=True)
+    df = df.replace([np.inf, -np.inf], np.nan)  # replace really big
+    ''' infinite price changes with nan '''
+    df.dropna(inplace=True)
+    df_vals = df[[ticker for ticker in tickers]].pct_change()
+    #df_vals = df[[ticker_name for ticker_name in tickers[0]]].pct_change()
+    df_vals = df_vals.replace([np.inf, -np.inf], 0)
+    df_vals.fillna(0, inplace=True)
+    X = df_vals.values
+    y = df['{}_target'.format(ticker)].values
+    return X, y, df
+
+
+
+
+#save_sp500_tickers()
+#get_data_from_yahoo()
+# compile_data()
+#visualize_data()
+#process_data_for_labels('XOM')
+extract_featuresets('XOM')
